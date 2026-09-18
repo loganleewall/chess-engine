@@ -1,7 +1,7 @@
 # chess-agent-simple
 
-A chess engine in 762 lines of Python, including the trained evaluation
-network. `python3 play.py` and it plays.
+A chess engine in 762 lines of Python, plus the 314 lines that train its
+evaluation network. `python3 play.py` and it plays.
 
 This is the teaching version of a competition engine I wrote for the AI
 Chessathon. It runs the same network, off the same weights file, and produces
@@ -21,6 +21,15 @@ Every idea that produces the strength is here. Only the optimisation is gone.
 | `nnue.py` | 46 | The evaluation network. King-zoned inputs, two perspectives, eight output heads, all integer arithmetic. |
 | `agent.py` | 67 | The entry point the competition harness calls, and the safety net under it. |
 | `nnue.npz` | 6.5 MB | The trained weights. The same file the competition engine ships. |
+
+The training pipeline, which produces `nnue.npz` and is never imported while
+playing:
+
+| | code | |
+|---|---|---|
+| `prepare.py` | 118 | Lichess evaluation dump to shards. The filtering is the interesting part. |
+| `train.py` | 196 | Torch training and the quantized int16 export. |
+| `data/sample_*.npz` | 8.6 MB | 400,000 real positions so `train.py` runs out of the box. |
 
 | | | |
 |---|---|---|
@@ -43,6 +52,13 @@ python3 check_nnue.py     # the network is right, ~20s, must say ALL PASS
 python3 play.py           # self play at 0.2s a move
 python3 human.py          # play it yourself
 python3 agent.py          # the harness API on three test positions
+```
+
+Training needs torch, which nothing else does:
+
+```bash
+pip install torch
+python3 train.py          # trains on the bundled sample, ~20s
 ```
 
 Without numpy, or with `CHESS_NNUE=0`, the same code falls back to the
@@ -144,6 +160,104 @@ integer adds per move, instead of summing 32 rows per evaluation. That is
 worth about 60 lines of the most delicate code in the real `board.py`, and
 skipping it is most of why this version is slower.
 
+## Training the network
+
+`nnue.npz` did not come from anywhere. `prepare.py` and `train.py` are how it
+was made, and both run.
+
+```bash
+pip install torch
+python3 train.py
+```
+
+```
+1 shard(s), 397,312 positions per epoch, 20,000 held out
+hidden 128, batch 4096, 10 epochs, device mps
+
+  before training   val 0.06549
+  epoch   1        train 0.04412   val 0.03556       2s
+  epoch   5        train 0.01407   val 0.02608      10s
+  epoch  10        train 0.00973   val 0.02472      20s
+
+  quantization error   mean 8.3 cp, max 42 cp
+  vs stockfish         mean 341 cp (predicting 0 would be 506 cp)
+
+  wrote mynet.npz
+  to play with it:  cp mynet.npz nnue.npz && python3 play.py
+```
+
+### Where the data comes from
+
+The labels are Stockfish evaluations, taken from the Lichess evaluation dump:
+395 million positions somebody else already paid the compute to evaluate
+deeply, published CC0. `prepare.py` streams that file, filters it, and writes
+shards.
+
+```bash
+curl -s https://database.lichess.org/lichess_db_eval.jsonl.zst \
+  | zstd -dc | head -n 4000000 | python3 prepare.py - data/shard
+```
+
+It keeps about 15% of what it reads, and the discards are the interesting
+part:
+
+| Dropped | Why |
+|---|---|
+| evaluated shallower than depth 10 | the label is not worth learning from |
+| the position is in check | the search resolves it |
+| the best move is a capture | the search resolves it too |
+| the position could not occur in a game | malformed records |
+
+Throwing away every sharp position looks wasteful and is the opposite. The
+search has quiescence, which plays out all the captures before it asks for a
+score, so the network is never called on a position in the middle of a trade.
+Train it on those anyway and it spends its capacity on a job the search does
+better.
+
+The shards hold raw piece lists, not network input indices. Those depend on
+where each king stands, so they are derived at training time by `train.py` and
+at play time by `nnue.py`, which means the king zone scheme can change without
+reprocessing 21 GB.
+
+### What the network is asked to predict
+
+    target = sigmoid(centipawns / 400)
+
+Not centipawns directly. One position at +12000 would otherwise outweigh a
+thousand ordinary ones at +30, and the network would spend itself learning to
+shout. Squashing to a win probability bounds the label, so being wrong about a
+won position costs about what being wrong about a level one costs.
+
+Weights are clamped to +/-1.98 after every optimiser step. That is what makes
+`round(weight * 255)` safe to put in an int16 at export time, and it is why
+the quantization error above is 8 cp rather than nonsense.
+
+### The bundled sample is deliberately too small
+
+400,000 positions, against the 96 million the shipped network was trained on.
+Run `check_nnue.py` against a net you trained on it and you get:
+
+```
+1. mirror symmetry
+   3,000 of 3,000 positions match exactly
+2. sanity anchors  (weight quality, not wiring)
+       -82 cp  weak  White is a queen down, to move (expected -1400 to -500)
+```
+
+The wiring is perfect and the network still has no idea what being a queen
+down means, because the dump is mostly real games near material balance and
+400,000 of them contain almost nothing that lopsided. That gap between the two
+checks is the most useful thing in this repo: one of them tests the code, the
+other tests the data, and they fail independently.
+
+Measured on the same held-out positions:
+
+| | mean error vs Stockfish |
+|---|---|
+| predicting 0 for everything | 506 cp |
+| trained on the bundled 400k sample | 341 cp |
+| the shipped `nnue.npz`, 96M positions | 252 cp |
+
 ## What was dropped, and where it went
 
 Everything in this table is in the full engine and not here. None of it
@@ -152,6 +266,8 @@ changes what the engine understands, only how fast it gets there.
 | Dropped | What it does | Cost of dropping it |
 |---|---|---|
 | numba compilation | compiles the search to machine code | roughly 60x fewer positions per second |
+| multiprocessing in `prepare.py` | shards the dump in parallel | a slower one-off preprocessing run |
+| training checkpoints and resume | survives a killed multi-day run | fine for a 20 second run, not for a real one |
 | incremental accumulator | updates the network's hidden layer per move | this version rebuilds it per evaluation, about 7x slower |
 | magic bitboards | sliding attacks by one table lookup | this version walks the rays instead |
 | null move pruning | assume a free move for the opponent, prune if still winning | depth |

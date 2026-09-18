@@ -1,6 +1,6 @@
 # Demo
 
-Five commands, about six minutes. Python 3.9 or newer and numpy.
+Six commands, about eight minutes. Python 3.9 or newer and numpy.
 
 ```bash
 cd chess-agent-simple
@@ -102,7 +102,45 @@ That turns the network off and falls back to material plus piece-square
 tables. The node rate roughly triples and it gets about one more ply of depth,
 and it still plays worse. That trade is the whole argument for the network.
 
-## 4. It answers the harness (10 seconds)
+## 4. Train one yourself (30 seconds)
+
+```bash
+pip install torch
+python3 train.py
+```
+
+The weights in `nnue.npz` were made by this file. It runs on 400,000 real
+positions bundled in `data/`, which is enough to watch it learn and far too
+few to learn properly.
+
+```
+  before training   val 0.06549
+  epoch   5        train 0.01407   val 0.02608      10s
+  epoch  10        train 0.00973   val 0.02472      20s
+
+  quantization error   mean 8.3 cp, max 42 cp
+  vs stockfish         mean 341 cp (predicting 0 would be 506 cp)
+```
+
+Two things to point at. The quantization line is the float network and the
+integer one being compared on the same positions after the export, because the
+integer one is what plays and rounding is where a silent bug would live. And
+341 against a baseline of 506 means it learned something real, while the
+shipped network gets 252 on the same positions, which is what 96 million
+positions buys over 400,000.
+
+Drop it in and play with it:
+
+```bash
+cp mynet.npz nnue.npz && python3 play.py
+```
+
+Then run `check_nnue.py` on it. Mirror symmetry still passes, because the code
+is right. The sanity anchors fail, because the network never saw enough
+lopsided material to know what a queen is worth. One check tests the code, the
+other tests the data.
+
+## 5. It answers the harness (10 seconds)
 
 ```bash
 python3 agent.py
@@ -120,7 +158,7 @@ free queen: expect e5d5          -> e5d5
 The mate line is worth pointing at. It finishes at depth 1 in 34 nodes,
 because iterative deepening stops as soon as it has a mate it can reach.
 
-## 5. Play it yourself (as long as you like)
+## 6. Play it yourself (as long as you like)
 
 ```bash
 python3 human.py          # you are White, engine gets 1s
@@ -144,10 +182,11 @@ never stops counting halfway through a trade.
 ## If you want to read the code
 
 `board.py` first, then `nnue.py`, then `engine.py`, then `agent.py`. That is
-dependency order and roughly difficulty order. Every file opens with a
-docstring saying what the whole file is for.
+dependency order and roughly difficulty order. `prepare.py` and `train.py`
+stand on their own and can be read any time. Every file opens with a docstring
+saying what the whole file is for.
 
-Four places worth going straight to:
+Five places worth going straight to:
 
 | | |
 |---|---|
@@ -155,3 +194,4 @@ Four places worth going straight to:
 | `engine.py`, `_order_moves` | the single biggest lever on how deep it gets. |
 | `nnue.py`, `feature_indices` | how a chess position becomes network input. |
 | `board.py`, `push` | make the move, then check whether it was legal. |
+| `prepare.py`, `parse_record` | which positions are thrown away, and why. |
