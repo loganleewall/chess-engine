@@ -15,10 +15,7 @@ deeply. That is the whole reason this project could train a network at all:
 the labels were free, and generating them from scratch would have taken
 months of CPU.
 
-This is the simplified mirror of the full repo's `nnue/prepare.py`. Dropped:
-the multiprocessing pool, and the progress accounting. The filtering and the
-output format are identical, and unlike the original this version parses FEN
-with our own `board.py` rather than python-chess, so it needs nothing extra.
+FEN is parsed with our own `board.py`, so this needs nothing beyond numpy.
 
 
 WHY IT THROWS MOST POSITIONS AWAY

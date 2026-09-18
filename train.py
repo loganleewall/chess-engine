@@ -1,20 +1,4 @@
-"""Train the evaluation network and export the weights the engine plays with.
-
-    python3 train.py                             # the bundled sample, ~20s
-    python3 train.py --out mynet.npz --epochs 8
-    python3 train.py --data 'shards/*.npz' --val shards/held_out.npz
-
-Needs torch, which nothing else in this repo does:
-
-    pip install torch
-
-This is the simplified mirror of the full repo's `nnue/train.py` (214 lines of
-code there, ~120 here). Same architecture, same target, same quantized export
-format. Dropped: resuming from a checkpoint, oversampling a second dataset,
-per-epoch checkpointing, and the learning rate schedule's finer knobs. None of
-those change what the network learns, only how a long run is managed.
-
-
+"""
 WHAT IS BEING LEARNED
 ---------------------
 A number for a quiet position, in the units the search wants.
@@ -25,58 +9,7 @@ not learning to play chess. We are learning to predict a strong engine's
 verdict on a position, quickly, so that our own search can call it millions of
 times a second.
 
-Three decisions shape what the network ends up knowing, and each one is worth
-being able to defend:
-
-1. THE TARGET IS A PROBABILITY, NOT CENTIPAWNS.
-
-       target = sigmoid(cp / 400)
-
-   Train directly on centipawns and a single position evaluated at +12000
-   (mate in a few) contributes more to the loss than a thousand ordinary
-   positions at +30. The network would spend its capacity learning to shout.
-   Squashing through a sigmoid turns the label into "how likely is this to be
-   a win", which is bounded, so being wrong about a won position costs about
-   as much as being wrong about a level one. 400 is the scale that makes a
-   pawn's advantage land in a sensible part of the curve.
-
-2. QUIET POSITIONS ONLY.
-
-   `prepare.py` throws away every position that is in check or whose best move
-   is a capture. This looks wasteful and is the opposite. The search already
-   has quiescence, which plays out every capture before asking for a score, so
-   the network is never called on a position in the middle of a trade. Train
-   it on those anyway and you spend capacity teaching it to do a job the
-   search does better, and worse, you teach it that material can be recovered
-   in positions where our search knows it cannot.
-
-3. THE INPUTS KNOW WHERE THE KING IS.
-
-   A plain "piece on square" encoding has 768 inputs and cannot represent king
-   safety: it has no way to say that a knight on f5 is dangerous when the king
-   is castled short and irrelevant when it is not. So the board is divided
-   into 16 zones, and which zone YOUR OWN king stands in shifts every one of
-   your input indices. 768 x 16 = 12,288 inputs, of which at most 32 are ever
-   set. See `king_zone_table` below.
-
-
-THE OUTPUT HAS TO BE INTEGERS
------------------------------
-Training happens in float. The engine evaluates in int16, because integer adds
-are what a CPU vectorises and the evaluation runs inside a search doing
-millions of positions a second. So the last thing this file does is round the
-weights to integers and then CHECK that the integer forward pass still agrees
-with the float one. Two implementations of the same network now exist, and the
-integer one is the one that plays.
-
-`WEIGHT_CLIP = 1.98` is why the rounding is safe: weights are clamped after
-every optimiser step, so `round(w * 255)` always fits in an int16 and no
-accumulator can overflow.
-
-`check_nnue.py` is the other half of this, and checks the exported file
-against the engine that reads it.
 """
-
 import argparse
 import glob
 import time
@@ -85,8 +18,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# Quantization scales. These are a contract with nnue.py and with the full
-# engine's board.py: change one here and the weights stop being readable.
+# Quantization scales. These are a contract with nnue.py: change one here
+# and the weights stop being readable.
 QA, QB, SCALE = 255, 64, 400
 
 NUM_ZONES = 16
@@ -131,36 +64,57 @@ KING_ZONE = king_zone_table()
 def feature_indices(piece, square, zones):
     """Piece lists -> the input indices that are set, for both perspectives.
 
-    `piece` and `square` are (batch, 32), padded with -1 where a position has
-    fewer than 32 pieces. Returns two (batch, 32) index tensors, one per
-    perspective, padded with FEATURES so the embedding's padding row (which is
-    held at zero) absorbs them.
+    `piece` and `square` are (batch, 32), one slot per piece. A position with
+    fewer than 32 pieces fills its leftover slots with piece -1, and whatever
+    square sits beside a -1 is ignored. Returns two (batch, 32) index tensors,
+    one per perspective, padded with FEATURES so the embedding's padding row
+    (which is held at zero) absorbs them.
 
     This is the batched twin of `feature_indices` in nnue.py. Same arithmetic,
     same result; that file does one position at a time in plain Python, this
     one does 16,384 at once on the GPU.
     """
+   
     padded = piece < 0
-    colour = torch.where(padded, 0, piece // 6)
-    kind = torch.where(padded, 0, piece % 6)
+    colour = torch.where(padded, 0, piece // 6) #white or black
+    kind = torch.where(padded, 0, piece % 6) #which piece
 
     out = []
-    for perspective in (0, 1):
+    for perspective in (0, 1):              # 0 = White's view, 1 = Black's
         own_king = 5 if perspective == 0 else 11
         # Exactly one square holds our king, so masking and summing finds it.
         king_square = (square * (piece == own_king)).sum(1)
+
+        # Black sees the board upside down. XOR with 56 flips the rank and
+        # keeps the file (e8 <-> e1, a7 <-> a2); for White it is XOR 0, a no-op.
+        # The king's square is flipped too, because the zone table is written
+        # from the king's own side of the board.
         flip = 56 * perspective
         zone = zones[king_square ^ flip]
+
+        # One index per piece, built from four parts. Each part is multiplied
+        # by the size of everything after it, so every combination lands on its
+        # own number, 0..12,287:
+        #
+        #   zone          which of 16 zones MY king is in        x 768
+        #   mine/theirs   colour ^ perspective, 0 means mine     x 384
+        #   kind          pawn .. king                           x 64
+        #   square        0..63, flipped for Black               x 1
+        #
+        # `zone` is one number per position; [:, None] repeats it across all 32
+        # of that position's pieces.
         index = (zone[:, None] * 768
                  + (colour ^ perspective) * 384
                  + kind * 64
                  + (square ^ flip))
+
+        # Empty slots point at the extra all-zero row, so they add nothing.
         out.append(torch.where(padded, FEATURES, index))
     return out[0], out[1]
 
 
 def output_bucket(piece):
-    """Which of the 8 output heads, by how many pieces are left.
+    """Which of the 8 linear output heads, by how many pieces are left.
 
     An endgame and a middlegame do not share a scale: a one pawn edge with
     queens on is worth much less than the same pawn in a king and pawn ending.
@@ -168,7 +122,7 @@ def output_bucket(piece):
     without having to encode it in the hidden layer.
     """
     count = (piece >= 0).sum(1)
-    return ((count - 2) // 4).clamp(0, OUT_BUCKETS - 1)
+    return ((count - 2) // 4).clamp(0, OUT_BUCKETS - 1) 
 
 
 class Net(nn.Module):
@@ -180,9 +134,9 @@ class Net(nn.Module):
         # the same thing (a 12,288 x hidden matrix), but the input is a list of
         # at most 32 set indices rather than a 12,288-long vector of mostly
         # zeros, so summing the named rows is the whole first layer.
-        self.ft = nn.Embedding(FEATURES + 1, hidden, padding_idx=FEATURES)
-        self.ft_b = nn.Parameter(torch.zeros(hidden))
-        self.out_w = nn.Parameter(torch.zeros(OUT_BUCKETS, 2 * hidden))
+        self.ft = nn.Embedding(FEATURES + 1, hidden, padding_idx=FEATURES) #embedding
+        self.ft_b = nn.Parameter(torch.zeros(hidden)) #bias
+        self.out_w = nn.Parameter(torch.zeros(OUT_BUCKETS, 2 * hidden)) #weight table
         self.out_b = nn.Parameter(torch.zeros(OUT_BUCKETS))
 
         nn.init.normal_(self.ft.weight, std=0.05)
@@ -200,9 +154,10 @@ class Net(nn.Module):
         mine = torch.where(white_moves, white, black)
         theirs = torch.where(white_moves, black, white)
 
-        # SCReLU: clamp to [0, 1], then square. The clamp is what the integer
-        # version's clamp to [0, QA] becomes; the square is the only
-        # nonlinearity in the network, and it costs one multiply.
+        # SCReLU: clamp to [0, 1], then square. The clamp is a clipped ReLU,
+        # the integer version's clamp to [0, QA]; together with the square it
+        # is the network's only nonlinearity. The square lets pairs of pieces
+        # interact, and it costs one multiply.
         hidden = torch.cat([mine, theirs], 1).clamp(0, 1)
         return (hidden * hidden * self.out_w[bucket]).sum(1) + self.out_b[bucket]
 
@@ -259,9 +214,8 @@ def quantize(net):
 def integer_eval(piece, square, stm, ft_w, ft_b, out_w, out_b):
     """The engine's integer forward pass, in numpy, for checking the export.
 
-    This must agree with `nnue.evaluate` and with the full engine's compiled
-    `evaluate`. It exists so that the mismatch, if there is one, is caught
-    here rather than in a rated game three days later.
+    This must agree with `nnue.evaluate`. It exists so that the mismatch, if
+    there is one, is caught here rather than in a rated game three days later.
     """
     piece = torch.from_numpy(piece.astype(np.int64))
     square = torch.from_numpy(square.astype(np.int64))
@@ -384,7 +338,7 @@ def main():
              hidden=np.int32(args.hidden), out_buckets=np.int32(OUT_BUCKETS),
              num_kb=np.int32(NUM_ZONES), king_bucket=KING_ZONE.astype(np.int64))
     print(f"\n  wrote {args.out}")
-    print(f"  to play with it:  cp {args.out} nnue.npz && python3 play.py")
+    print(f"  to use it:  cp {args.out} nnue.npz")
 
 
 if __name__ == "__main__":

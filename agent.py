@@ -1,8 +1,5 @@
 """The competition entry point: the one function the harness calls.
 
-The simplified mirror of the full engine's `agent.py`: 78 lines of code
-there, 67 here.
-
 THE HARNESS'S ENTIRE API IS ONE FUNCTION:
 
     get_move(fen, time_left_ms) -> "e2e4"
@@ -20,12 +17,6 @@ no matter how well the engine plays, and each one gets a specific defence:
     crashing                    ->  catch every exception, return any legal move
     running out of time         ->  time_for_move() keeps a reserve it never spends
 
-The real agent.py does two more things this one does not need: it pins numpy's
-and numba's thread pools to one thread BEFORE importing them (they size
-themselves from the host's core count at import, and would thrash on a single
-dedicated core), and it runs a throwaway search at import to force numba to
-compile everything inside the 90-second startup budget rather than on the game
-clock. Neither applies here -- pure Python has no compile step.
 """
 
 import sys
@@ -43,7 +34,6 @@ _history = []
 _HISTORY_LIMIT = 200
 
 _last_fullmove_number = 0
-
 
 def _log(message):
     """Log to stderr, never stdout: stdout may be the harness's own channel."""
@@ -133,15 +123,3 @@ def get_move(fen: str, time_left_ms: int) -> str:
     except Exception as exc:              # broad on purpose: a crash is a loss
         _log(f"search failed ({exc!r}); falling back")
         return _fallback(fen)
-
-
-if __name__ == "__main__":
-    # A smoke test of the real API: three positions, one obvious answer each.
-    CASES = [
-        ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-         "opening move"),
-        ("6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1", "mate in 1: expect a1a8"),
-        ("7k/8/8/3qQ3/8/8/8/7K w - - 0 1", "free queen: expect e5d5"),
-    ]
-    for fen, description in CASES:
-        print(f"{description:<32} -> {get_move(fen, 10_000)}")

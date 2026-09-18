@@ -1,10 +1,5 @@
 """The search: given a position and a time budget, which move is best?
 
-The simplified mirror of the full engine's `engine.py`: 370 lines of code
-there, 195 here. It keeps the five ideas that do the actual work and drops
-the refinements that only buy speed. README.md lists exactly what went and
-why.
-
 WHAT IS HERE
 ------------
 1. negamax + alpha-beta      the search itself
@@ -17,7 +12,7 @@ THERE IS NO TREE OBJECT. Read `_negamax` and notice that it calls itself, and
 that `board.push()` / `board.pop()` mutate ONE board in place. The search tree
 exists only as the chain of active function calls -- a node is a stack frame,
 and it is gone the moment the function returns. Nothing is ever allocated to
-represent it. That is true of the real engine too.
+represent it.
 """
 
 import time
@@ -42,10 +37,8 @@ EXACT, LOWER_BOUND, UPPER_BOUND = 0, 1, 2
 class Engine:
     def __init__(self):
         # Zobrist key -> (depth, score, kind, best_move).
-        # The real engine uses five parallel numpy arrays of fixed size,
-        # because numba has no dicts. A dict is the same idea with automatic
-        # collision handling, which is why this version has no "is this slot
-        # really my position?" check.
+        # A dict handles collisions itself, which is why there is no "is this
+        # slot really my position?" check.
         self.transposition_table = {}
 
         self.nodes = 0                # how many positions we looked at
@@ -110,8 +103,7 @@ class Engine:
         """One full-depth pass over the root moves.
 
         This is separate from `_negamax` only so that "which move is best" is
-        visible in one place. The real engine folds this into the recursion
-        and stashes the root move in a shared array (`ctl[C_ROOTMOVE]`).
+        visible in one place.
         """
         alpha, beta = -INFINITY, INFINITY
         best_move, best_score = legal[0], -INFINITY
@@ -347,8 +339,8 @@ class Engine:
         is not. Multiplying the victim's value by 16 makes the victim dominate
         so the attacker only breaks ties.
 
-        The real engine adds two more heuristics here (killer moves and a
-        history table). Both are pure ordering improvements -- they change no
+        Killer moves and a history table are the natural next heuristics to
+        add here. Both are pure ordering improvements -- they change no
         results, only how fast cutoffs are found.
         """
         them = 1 - board.side
@@ -380,8 +372,8 @@ class Engine:
         history two plies at a time. Checking every ply would compare our
         positions against the opponent's and never match anything.
 
-        (That was a real bug in the full engine: it compared adjacent plies,
-        matched nothing, and drew a completely won endgame by repetition while
+        (Comparing adjacent plies is an easy bug to write: it matches nothing,
+        and the engine draws a completely won endgame by repetition while
         being blind to it.)
 
         We also stop at the last irreversible move: a capture or pawn move

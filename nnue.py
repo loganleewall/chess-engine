@@ -1,11 +1,6 @@
 """The evaluation network: how good is this position, in centipawns?
 
-This is the simplified mirror of the net inside the full engine's `board.py`,
-pulled out into its own file because it is the most interesting part of the
-project and deserves to be read on its own.
-
-It loads the same `nnue.npz` the competition engine ships and produces the
-same numbers, to the integer. `check_nnue.py` is the proof.
+The weights are in `nnue.npz`, which `train.py` produces.
 
 
 WHY A NETWORK AT ALL
@@ -14,12 +9,15 @@ The search decides which move to play by comparing positions at the bottom of
 the tree, so it needs a number for each one. `board.evaluate()` gives one by
 counting material and adding a per-square bonus. That knows a knight belongs
 in the centre and a king belongs behind pawns. It does not know anything else,
-and two specific failures in rated games showed where the ceiling was: it gave
-up material for an attack that was not there, and let a winning rook endgame
-fizzle into a draw. King safety and endgame scale. Neither fits in a table of
-64 numbers per piece.
+because it scores every piece alone: a knight on f3 is worth the same whether
+our king is safe or about to be mated.
 
-So the number comes from a small trained network instead.
+So the number comes from a small trained network instead. The first one used
+plain piece-square inputs and already beat the table, +15 =21 -4. Its rated
+games then showed what it still could not see: it gave up material for an
+attack that was not there, and let a winning rook endgame fizzle into a draw.
+King safety and endgame scale. The king zones and the eight output heads
+below are the fix for exactly those two.
 
 
 THE SHAPE
@@ -31,7 +29,9 @@ THE SHAPE
     x 16  the king zone. Which of 16 zones YOUR OWN king stands in shifts
           every one of your input indices, so a knight on f5 is a different
           input when your king is castled short than when it is on e1.
-          This is the whole trick: it is how the net can learn king safety.
+          This is what makes king safety easy to learn: "knight near my
+          king" becomes a single input instead of something the net has to
+          assemble from pairs.
     x 2   two perspectives. Each side sees the board from its own point of
           view, with colours swapped and ranks mirrored. Both share one
           weight table.
@@ -47,27 +47,24 @@ INTEGERS, NOT FLOATS
 --------------------
 Everything here is integer arithmetic. The trainer works in float and the
 export rounds the weights to int16, because integer adds are what a CPU
-vectorises, and this has to run millions of times a second in the real engine.
+vectorises, and the search calls this on every position it scores.
 That means two implementations of the same network now exist, and a
-quantization bug does not crash, it just makes the engine slightly worse. See
-`check_nnue.py`, which requires exact equality rather than a tolerance.
+quantization bug does not crash, it just makes the engine slightly worse.
+`train.py` compares the two after every export for exactly that reason.
 
     QA = 255    scale of the input weights and the accumulator
     QB = 64     scale of the output weights
     SCALE = 400 centipawns per unit of network output
 
 
-WHAT THE REAL ENGINE DOES DIFFERENTLY
+THE ACCUMULATOR IS REBUILT EVERY TIME
 -------------------------------------
-One thing, and it is the biggest complication in the real `board.py`:
-it never rebuilds the accumulator. A move touches at most two pieces, so
-`make` adds two weight rows and subtracts two, `unmake` restores a copy, and a
-king move rebuilds that side from scratch because every index changed. Four
-rows of 256 adds per move instead of summing 32 rows per evaluation.
-
-This file rebuilds from scratch every time, which is 10 to 20 times slower and
-about 60 lines shorter. Read it here, then read `_acc_update` in the real
-`board.py` to see what the speed costs in complexity.
+This file sums up to 32 rows per side on every evaluation. A faster design
+never rebuilds it: a move touches at most two pieces, so `push` would add two
+weight rows and subtract two, `pop` would restore a saved copy, and only a
+king move would rebuild that side from scratch, because every index changed.
+Four rows per move instead of up to 32 per evaluation, so up to eight times
+less arithmetic, for about 60 more lines of delicate bookkeeping in `board.py`.
 """
 
 import os
@@ -146,10 +143,11 @@ def evaluate(board):
 
     The output layer, in three steps:
 
-      1. SCReLU. Clamp each accumulator value to [0, 255] and square it. That
-         is the only nonlinearity in the network. Squaring rather than just
-         clamping is what makes it a network and not a linear function of the
-         inputs, and it is cheap: one multiply.
+      1. SCReLU. Clamp each accumulator value to [0, 255] and square it.
+         This is the network's only nonlinearity. The clamp is a clipped
+         ReLU, which on its own already makes the network nonlinear. The
+         square on top multiplies features together, so pairs of pieces can
+         interact, and it is cheap: one multiply.
 
       2. Dot product with the output row for this position's piece count.
          The side to move's accumulator goes in the first half of the row and

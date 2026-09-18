@@ -1,8 +1,6 @@
 """The rules of chess: what a position is, what moves exist, how to play one.
 
-The simplified mirror of the full engine's `board.py`: 658 lines of code
-there, 424 here. Same ideas, none of the speed tricks. Read this file first;
-it is the foundation everything else stands on.
+Read this file first; it is the foundation everything else stands on.
 
 THE THREE IDEAS IN THIS FILE
 ----------------------------
@@ -63,8 +61,7 @@ START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 # Bitboard helpers
 #
 # A bitboard is just a Python int used as a set of squares. Because Python
-# ints are arbitrary precision we never have to think about overflow, which
-# is one of the things that makes this file shorter than the real one.
+# ints are arbitrary precision we never have to think about overflow.
 # ---------------------------------------------------------------------------
 
 def lowest_square(bitboard):
@@ -72,10 +69,6 @@ def lowest_square(bitboard):
 
     `b & -b` isolates the lowest set bit (two's complement trick), and
     `.bit_length() - 1` turns that single bit into its position.
-
-    The real engine cannot use `.bit_length()` because it works on fixed-width
-    numpy integers, so it uses a "de Bruijn multiply" instead. Same answer,
-    four more lines of arithmetic.
     """
     return (bitboard & -bitboard).bit_length() - 1
 
@@ -84,7 +77,7 @@ def squares_of(bitboard):
     """Yield every square in the bitboard, lowest first.
 
     `b &= b - 1` clears the lowest set bit. This two-line loop is how you
-    iterate over pieces, and you will see it everywhere in both versions.
+    iterate over pieces, and you will see it everywhere.
     """
     while bitboard:
         yield lowest_square(bitboard)
@@ -100,9 +93,8 @@ def square_name(sq):
 # Attack tables, computed once at import
 #
 # For knights, kings and pawns, where a piece attacks depends only on where
-# it stands. So we precompute a bitboard per square. The real engine ships
-# these in tables.npz along with "magic bitboards" for the sliding pieces;
-# we compute them here in a few loops, and walk rays for the sliders.
+# it stands. So we precompute a bitboard per square, in a few loops. The
+# sliding pieces are handled separately below, by walking rays.
 # ---------------------------------------------------------------------------
 
 def _offset_table(offsets):
@@ -141,10 +133,9 @@ def sliding_attacks(sq, occupied, directions):
     is on it. So we walk outward in each direction and stop at the first
     occupied square -- including that square, because we might capture it.
 
-    The real engine replaces this whole loop with ONE multiply and ONE array
-    lookup ("magic bitboards"). That is ~150 lines of table generation and
-    it is the single biggest source of complexity we dropped here. This
-    version is maybe 20x slower and obviously correct.
+    The fast alternative is "magic bitboards": ONE multiply and ONE array
+    lookup, at the cost of ~150 lines of table generation. Walking the rays
+    is maybe 20x slower and obviously correct.
     """
     attacks = 0
     file, rank = sq % 8, sq // 8
@@ -186,7 +177,7 @@ ZOBRIST_BLACK_TO_MOVE = _rng.getrandbits(64)
 # knight in the centre is worth more than one in a corner. Written from
 # white's point of view, rank 8 first, so they read like a chessboard.
 #
-# The real engine replaces this with a trained neural network (nnue.npz). The
+# The trained network in nnue.py replaces these whenever it can load. The
 # net is strictly better, but this is the same *shape* of idea: a number per
 # piece per square, summed over the board.
 # ---------------------------------------------------------------------------
@@ -315,10 +306,7 @@ CASTLING_MASK[63] = 15 ^ CASTLE_BK                   # h8 rook
 # ---------------------------------------------------------------------------
 # Moves
 #
-# A move is a 4-tuple. The real engine packs the same four fields into the
-# bits of one integer, because numba needs move lists to be arrays of plain
-# numbers -- it cannot put tuples in a numpy array. Here a tuple is clearer
-# and costs us nothing.
+# A move is a 4-tuple: (from, to, promotion, flag).
 # ---------------------------------------------------------------------------
 
 def make_move(frm, to, promotion=0, flag=QUIET):
@@ -340,13 +328,7 @@ def move_to_uci(move):
 # ---------------------------------------------------------------------------
 
 class Board:
-    """A chess position, plus the stack needed to undo moves.
-
-    The real engine cannot use a class like this: numba's compiled mode has
-    no Python objects, so every field becomes a separate numpy array passed
-    into every function by hand. That is why its function signatures are 10
-    arguments long. Same data, uglier plumbing.
-    """
+    """A chess position, plus the stack needed to undo moves."""
 
     def __init__(self, fen=START_FEN):
         self.pieces = [0] * 12      # bitboard per piece, index colour*6+kind
@@ -432,8 +414,7 @@ class Board:
         move, look at whether our king is attacked, and take it back if so.
 
         A legal-move generator would be faster. This is ~15 lines instead of
-        ~150 and it cannot be subtly wrong, which is why the real engine
-        makes the same choice.
+        ~150 and it cannot be subtly wrong.
         """
         frm, to, promotion, flag = move
         us, them = self.side, 1 - self.side
@@ -755,8 +736,8 @@ class Board:
     def to_fen(self):
         """The position back out as FEN. The inverse of `set_fen`.
 
-        Only used by tooling (`check_nnue.py`, and anything that wants to
-        paste a position into a real board), never by the search.
+        Never used by the search; handy for pasting a position into another
+        tool while debugging.
         """
         rows = []
         for rank in range(7, -1, -1):
