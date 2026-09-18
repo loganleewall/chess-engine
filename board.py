@@ -20,6 +20,14 @@ So `sq // 8` is the rank (0-7) and `sq % 8` is the file (0-7).
 
 import random
 
+# The trained evaluation network. Guarded because it is the one thing here
+# that needs numpy: without it, `evaluate` uses the piece-square tables and
+# everything else is unchanged.
+try:
+    import nnue
+except ImportError:
+    nnue = None
+
 # ---------------------------------------------------------------------------
 # Naming things
 # ---------------------------------------------------------------------------
@@ -660,9 +668,26 @@ class Board:
         Positive means the side to move is better. That sign convention is
         what lets the search negate scores as it recurses (see engine.py).
 
-        Sum of material + piece-square bonus. The tables are written from
-        white's point of view, so we sum them all and flip at the end if it
-        is black's turn.
+        Two evaluations live in this repo and both return the same units:
+
+          `nnue.evaluate`      a trained network. This is what plays.
+          `evaluate_tables`    material and piece-square bonuses, which is
+                               what the network replaced, and the fallback
+                               when nnue.npz or numpy is missing.
+
+        Keeping the old one is not sentiment. It is the baseline the network
+        is measured against, and it is what the search falls back to if the
+        weights will not load.
+        """
+        if nnue is not None and nnue.AVAILABLE:
+            return nnue.evaluate(self)
+        return self.evaluate_tables()
+
+    def evaluate_tables(self):
+        """The hand written evaluation: material plus a bonus per square.
+
+        The tables are written from white's point of view, so we sum them all
+        and flip the sign at the end if it is black's turn.
         """
         # Pick the king table by how much material is left. Anything below
         # roughly "queen + rook each gone" counts as an endgame.
@@ -726,6 +751,35 @@ class Board:
 
         self.halfmove_clock = int(parts[4]) if len(parts) > 4 else 0
         self._rebuild_key()
+
+    def to_fen(self):
+        """The position back out as FEN. The inverse of `set_fen`.
+
+        Only used by tooling (`check_nnue.py`, and anything that wants to
+        paste a position into a real board), never by the search.
+        """
+        rows = []
+        for rank in range(7, -1, -1):
+            row, empty = "", 0
+            for file in range(8):
+                sq = rank * 8 + file
+                for piece in range(12):
+                    if self.pieces[piece] >> sq & 1:
+                        if empty:
+                            row += str(empty)
+                            empty = 0
+                        row += "PNBRQKpnbrqk"[piece]
+                        break
+                else:
+                    empty += 1
+            rows.append(row + (str(empty) if empty else ""))
+
+        rights = "".join(ch for ch, bit in (("K", CASTLE_WK), ("Q", CASTLE_WQ),
+                                            ("k", CASTLE_BK), ("q", CASTLE_BQ))
+                         if self.castling & bit) or "-"
+        ep = "-" if self.ep_square < 0 else square_name(self.ep_square)
+        return (f"{'/'.join(rows)} {'w' if self.side == WHITE else 'b'} "
+                f"{rights} {ep} {self.halfmove_clock} 1")
 
     def _rebuild_key(self):
         """Compute the Zobrist key from scratch. Only needed after set_fen --
